@@ -4,6 +4,27 @@ import type { SavedTrack, TrackMeta, TrackPoint } from '../types'
 
 const ROOT = 'sharedDBTracking'
 
+type TracksRaw = Record<string, Record<string, { meta?: TrackMeta; points?: Record<string, TrackPoint> }>> | null
+
+function mapTracksByUser(raw: TracksRaw) {
+  if (!raw) {
+    return {}
+  }
+
+  const result: Record<string, SavedTrack[]> = {}
+  Object.entries(raw).forEach(([userId, tracksObj]) => {
+    const tracks = Object.values(tracksObj ?? {})
+      .filter((item) => item.meta)
+      .map((item) => {
+        const points = item.points ? Object.values(item.points).sort((a, b) => a.ts - b.ts) : []
+        return { meta: item.meta as TrackMeta, points }
+      })
+      .sort((a, b) => b.meta.startTime - a.meta.startTime)
+    result[userId] = tracks
+  })
+  return result
+}
+
 export function createTrack(deviceId: string, name: string) {
   const tracksRef = ref(db, `${ROOT}/gpsTracks/${deviceId}`)
   const created = push(tracksRef)
@@ -73,42 +94,13 @@ export function listenTracks(deviceId: string, cb: (tracks: SavedTrack[]) => voi
 export function listenAllTracks(cb: (tracksByUser: Record<string, SavedTrack[]>) => void) {
   const tracksRef = ref(db, `${ROOT}/gpsTracks`)
   return onValue(tracksRef, (snapshot) => {
-    const raw = snapshot.val() as
-      | Record<string, Record<string, { meta?: TrackMeta; points?: Record<string, TrackPoint> }>>
-      | null
-
-    if (!raw) {
-      cb({})
-      return
-    }
-
-    const result: Record<string, SavedTrack[]> = {}
-    Object.entries(raw).forEach(([userId, tracksObj]) => {
-      const tracks = Object.values(tracksObj ?? {})
-        .filter((item) => item.meta)
-        .map((item) => {
-          const points = item.points ? Object.values(item.points).sort((a, b) => a.ts - b.ts) : []
-          return { meta: item.meta as TrackMeta, points }
-        })
-        .sort((a, b) => b.meta.startTime - a.meta.startTime)
-      result[userId] = tracks
-    })
-    cb(result)
+    cb(mapTracksByUser(snapshot.val() as TracksRaw))
   })
 }
 
 export function listenAllLiveLocations(cb: (liveByUser: Record<string, TrackPoint | null>) => void) {
   const liveRef = ref(db, `${ROOT}/liveLocation`)
   return onValue(liveRef, (snapshot) => {
-    const raw = snapshot.val() as Record<string, TrackPoint> | null
-    if (!raw) {
-      cb({})
-      return
-    }
-    const result: Record<string, TrackPoint | null> = {}
-    Object.entries(raw).forEach(([userId, point]) => {
-      result[userId] = point ?? null
-    })
-    cb(result)
+    cb((snapshot.val() as Record<string, TrackPoint> | null) ?? {})
   })
 }
