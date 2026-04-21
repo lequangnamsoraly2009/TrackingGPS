@@ -1,39 +1,102 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
-import { createTrack, listenTracks, saveLiveLocation, saveTrackPoint, updateTrackMeta } from './lib/db'
-import { getDeviceId } from './lib/device'
+import { createTrack, listenAllLiveLocations, listenAllTracks, saveLiveLocation, saveTrackPoint, updateTrackMeta } from './lib/db'
 import { calcDistanceMeters, toTrackPoint } from './lib/geo'
+import currentMarkerImage from './assets/450304252_1265572144421131_3328656113765129665_n.jpg'
+import altMarkerImage from './assets/448649236_461488343173256_9057384935763512322_n.jpg'
 import type { SavedTrack, TrackMeta, TrackPoint } from './types'
 
-type TrackingState = 'idle' | 'tracking' | 'paused'
-type Tab = 'track' | 'routes' | 'settings'
+type TrackingState = 'idle' | 'tracking'
 type PermissionStateEx = 'unknown' | 'granted' | 'denied' | 'prompt'
+type Profile = { id: string; label: string; pin: string; markerImage: string }
+type LatLng = { lat: number; lng: number }
+type RenderTrack = SavedTrack & { profileId: string }
+
+const PROFILES: Profile[] = [
+  { id: 'profile-a', label: 'Soraly', pin: '123456', markerImage: currentMarkerImage },
+  { id: 'profile-b', label: 'Stacy', pin: '111111', markerImage: altMarkerImage },
+]
+const SIM_TARGETS: Record<string, LatLng> = {
+  'profile-a': { lat: 10.8624948, lng: 106.6474743 },
+  'profile-b': { lat: 10.833864, lng: 106.681869 },
+}
+
+function getMarkerIcon(image: string, profileId?: string) {
+  return L.divIcon({
+    className: `current-marker ${profileId ?? ''}`.trim(),
+    html: `<img src="${image}" class="current-marker-image" alt="Vị trí hiện tại" />`,
+    iconSize: [40, 40],
+    iconAnchor: [20, 20],
+  })
+}
+
+function getMarkerImageByUserId(userId: string) {
+  return PROFILES.find((p) => p.id === userId)?.markerImage ?? currentMarkerImage
+}
+
+function getRouteColorByUserId(userId: string) {
+  const palette = ['#dc2626', '#2563eb', '#16a34a', '#d97706', '#9333ea', '#0891b2']
+  if (userId === 'profile-a') return '#dc2626'
+  if (userId === 'profile-b') return '#2563eb'
+  let hash = 0
+  for (let i = 0; i < userId.length; i += 1) hash = (hash * 31 + userId.charCodeAt(i)) >>> 0
+  return palette[hash % palette.length]
+}
 
 function App() {
-  const deviceId = useMemo(() => getDeviceId(), [])
-  const [tracks, setTracks] = useState<SavedTrack[]>([])
+  const [tracksByProfile, setTracksByProfile] = useState<Record<string, SavedTrack[]>>({})
   const [activeTrackId, setActiveTrackId] = useState<string | null>(null)
   const [livePoint, setLivePoint] = useState<TrackPoint | null>(null)
-  const [trackName, setTrackName] = useState('')
   const [state, setState] = useState<TrackingState>('idle')
-  const [selectedTrack, setSelectedTrack] = useState<SavedTrack | null>(null)
-  const [tab, setTab] = useState<Tab>('track')
   const [sheetExpanded, setSheetExpanded] = useState(false)
   const [permission, setPermission] = useState<PermissionStateEx>('unknown')
   const [error, setError] = useState('')
+  const [activeProfile, setActiveProfile] = useState<Profile | null>(null)
+  const [showPinModal, setShowPinModal] = useState(false)
+  const [pinInput, setPinInput] = useState('')
+  const [pinError, setPinError] = useState('')
+  const [isSimulating, setIsSimulating] = useState(false)
+  const [liveByProfile, setLiveByProfile] = useState<Record<string, TrackPoint | null>>({})
 
   const watchIdRef = useRef<number | null>(null)
   const activeMetaRef = useRef<TrackMeta | null>(null)
   const lastSavedPointRef = useRef<TrackPoint | null>(null)
   const mapRef = useRef<L.Map | null>(null)
-  const markerRef = useRef<L.CircleMarker | null>(null)
-  const polylineRef = useRef<L.Polyline | null>(null)
+  const markerRef = useRef<L.Marker | null>(null)
+  const routesLayerRef = useRef<L.LayerGroup | null>(null)
+  const liveMarkersLayerRef = useRef<L.LayerGroup | null>(null)
+  const liveMarkerRefs = useRef<Record<string, L.Marker>>({})
   const mapNodeRef = useRef<HTMLDivElement | null>(null)
+  const simulationTimerRef = useRef<number | null>(null)
+  const isUnlocked = Boolean(activeProfile)
+  const markerIcon = useMemo(
+    () => getMarkerIcon(activeProfile?.markerImage ?? currentMarkerImage, activeProfile?.id),
+    [activeProfile],
+  )
 
   useEffect(() => {
-    const unsubscribe = listenTracks(deviceId, setTracks)
-    return () => unsubscribe()
-  }, [deviceId])
+    if (markerRef.current) {
+      markerRef.current.setIcon(markerIcon)
+    }
+  }, [markerIcon])
+
+  const upsertCurrentMarker = useCallback((point: TrackPoint) => {
+    const map = mapRef.current
+    if (!map) {
+      return
+    }
+    const latlng: [number, number] = [point.lat, point.lng]
+    if (!markerRef.current) {
+      markerRef.current = L.marker(latlng, { icon: markerIcon, zIndexOffset: 1000 }).addTo(map)
+      return
+    }
+    markerRef.current.setIcon(markerIcon)
+    markerRef.current.setLatLng(latlng)
+  }, [markerIcon])
+
+  useEffect(() => listenAllTracks(setTracksByProfile), [])
+
+  useEffect(() => listenAllLiveLocations(setLiveByProfile), [])
 
   useEffect(() => {
     let mounted = true
@@ -76,9 +139,16 @@ function App() {
     }
   }, [])
 
+  const tracks = useMemo<RenderTrack[]>(() => {
+    const all = Object.entries(tracksByProfile).flatMap(([profileId, userTracks]) =>
+      (userTracks ?? []).map((track) => ({ ...track, profileId })),
+    )
+    return all.sort((a, b) => b.meta.startTime - a.meta.startTime)
+  }, [tracksByProfile])
   const activeTrack = tracks.find((item) => item.meta.id === activeTrackId) ?? null
-  const polylinePoints = selectedTrack?.points ?? activeTrack?.points ?? []
-  const gpsStatus = state === 'tracking' ? 'Sharing live' : state === 'paused' ? 'Paused' : 'Not sharing'
+  const gpsStatus = state === 'tracking' ? 'Đang chia sẻ vị trí' : 'Chưa chia sẻ vị trí'
+  const currentSpeedKmh = livePoint?.speed !== null && livePoint?.speed !== undefined ? Math.max(0, livePoint.speed * 3.6) : 0
+  const speedDisplay = Math.round(currentSpeedKmh)
 
   useEffect(() => {
     const map = mapRef.current
@@ -86,18 +156,22 @@ function App() {
       return
     }
 
-    if (polylineRef.current) {
-      polylineRef.current.removeFrom(map)
-      polylineRef.current = null
+    if (!routesLayerRef.current) {
+      routesLayerRef.current = L.layerGroup().addTo(map)
     }
 
-    if (polylinePoints.length > 1) {
-      polylineRef.current = L.polyline(polylinePoints.map((p) => [p.lat, p.lng] as [number, number]), {
-        color: '#2563eb',
-        weight: 4,
-      }).addTo(map)
-    }
-  }, [polylinePoints])
+    routesLayerRef.current.clearLayers()
+    tracks.forEach((track) => {
+      if (track.points.length > 1) {
+        const baseColor = getRouteColorByUserId(track.profileId)
+        L.polyline(track.points.map((p) => [p.lat, p.lng] as [number, number]), {
+          color: baseColor,
+          weight: track.meta.id === activeTrackId ? 4 : 3,
+          opacity: track.meta.id === activeTrackId ? 1 : 0.65,
+        }).addTo(routesLayerRef.current as L.LayerGroup)
+      }
+    })
+  }, [tracks, activeTrackId])
 
   useEffect(() => {
     const map = mapRef.current
@@ -105,41 +179,99 @@ function App() {
       return
     }
 
-    const latlng: [number, number] = [livePoint.lat, livePoint.lng]
-    if (!markerRef.current) {
-      markerRef.current = L.circleMarker(latlng, {
-        radius: 7,
-        color: '#1d4ed8',
-        weight: 2,
-        fillColor: '#3b82f6',
-        fillOpacity: 0.8,
-      }).addTo(map)
-    } else {
-      markerRef.current.setLatLng(latlng)
+    upsertCurrentMarker(livePoint)
+    map.setView([livePoint.lat, livePoint.lng], Math.max(16, map.getZoom()), { animate: true })
+  }, [livePoint, upsertCurrentMarker])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) {
+      return
     }
 
-    map.setView(latlng, Math.max(16, map.getZoom()), { animate: true })
-  }, [livePoint])
+    if (!liveMarkersLayerRef.current) {
+      liveMarkersLayerRef.current = L.layerGroup().addTo(map)
+    }
+
+    const layer = liveMarkersLayerRef.current
+    Object.entries(liveByProfile).forEach(([userId, point]) => {
+      if (activeProfile?.id === userId) {
+        const existing = liveMarkerRefs.current[userId]
+        if (existing) {
+          layer.removeLayer(existing)
+          delete liveMarkerRefs.current[userId]
+        }
+        return
+      }
+
+      if (!point) {
+        const existing = liveMarkerRefs.current[userId]
+        if (existing) {
+          layer.removeLayer(existing)
+          delete liveMarkerRefs.current[userId]
+        }
+        return
+      }
+
+      const latlng: [number, number] = [point.lat, point.lng]
+      const icon = getMarkerIcon(getMarkerImageByUserId(userId), userId)
+      const existing = liveMarkerRefs.current[userId]
+      if (!existing) {
+        liveMarkerRefs.current[userId] = L.marker(latlng, { icon, zIndexOffset: 900 }).addTo(layer)
+      } else {
+        existing.setIcon(icon)
+        existing.setLatLng(latlng)
+      }
+    })
+  }, [activeProfile, liveByProfile])
 
   const startTracking = async () => {
+    if (!isUnlocked) {
+      setError('Tính năng vẽ tuyến đang bị khóa')
+      return
+    }
     setError('')
     try {
+      const profileId = activeProfile?.id
+      if (!profileId) {
+        setError('Chưa chọn profile')
+        return
+      }
       await requestLocationPermission()
-      const created = await createTrack(deviceId, trackName.trim() || `Route ${new Date().toLocaleString()}`)
+      const created = await createTrack(profileId, `Auto ${new Date().toLocaleString()}`)
       activeMetaRef.current = created.meta
       setActiveTrackId(created.id)
-      setSelectedTrack(null)
       setState('tracking')
       lastSavedPointRef.current = null
       ensureWatch(created.id)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cannot start tracking')
+      setError(err instanceof Error ? err.message : 'Không thể bắt đầu theo dõi')
     }
+  }
+
+  const processIncomingPoint = async (trackId: string, point: TrackPoint) => {
+    setLivePoint(point)
+    if (!activeProfile) {
+      return
+    }
+    await saveLiveLocation(activeProfile.id, point)
+    await saveTrackPoint(activeProfile.id, trackId, point)
+
+    const previous = lastSavedPointRef.current
+    lastSavedPointRef.current = point
+    if (!previous || !activeMetaRef.current) {
+      return
+    }
+
+    activeMetaRef.current.distanceMeters += calcDistanceMeters(previous, point)
+    activeMetaRef.current.endTime = point.ts
+    activeMetaRef.current.durationMs = activeMetaRef.current.endTime - activeMetaRef.current.startTime
+    await updateTrackMeta(activeProfile.id, activeMetaRef.current)
   }
 
   const requestLocationPermission = async () => {
     if (!navigator.geolocation) {
-      throw new Error('GPS is not supported on this device')
+      throw new Error('Thiết bị không hỗ trợ GPS')
     }
     await new Promise<void>((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
@@ -160,29 +292,22 @@ function App() {
     })
   }
 
-  const pauseTracking = () => {
-    stopWatch()
-    setState('paused')
-  }
-
-  const resumeTracking = () => {
-    if (activeTrackId) {
-      ensureWatch(activeTrackId)
-    }
-    setState('tracking')
-  }
-
   const stopTracking = async () => {
+    if (!isUnlocked) {
+      return
+    }
     stopWatch()
+    const profileId = activeProfile?.id
     const meta = activeMetaRef.current
-    if (meta) {
-      meta.endTime = Date.now()
+    if (meta && profileId) {
+      meta.endTime = livePoint?.ts ?? meta.endTime
       meta.durationMs = meta.endTime - meta.startTime
-      await updateTrackMeta(deviceId, meta)
+      await updateTrackMeta(profileId, meta)
     }
     activeMetaRef.current = null
     setActiveTrackId(null)
     setState('idle')
+    stopSimulation()
   }
 
   const ensureWatch = (trackId: string) => {
@@ -192,20 +317,7 @@ function App() {
     watchIdRef.current = navigator.geolocation.watchPosition(
       async (position) => {
         const point = toTrackPoint(position)
-        setLivePoint(point)
-        await saveLiveLocation(deviceId, point)
-        await saveTrackPoint(deviceId, trackId, point)
-
-        const previous = lastSavedPointRef.current
-        lastSavedPointRef.current = point
-        if (!previous || !activeMetaRef.current) {
-          return
-        }
-
-        activeMetaRef.current.distanceMeters += calcDistanceMeters(previous, point)
-        activeMetaRef.current.endTime = point.ts
-        activeMetaRef.current.durationMs = activeMetaRef.current.endTime - activeMetaRef.current.startTime
-        await updateTrackMeta(deviceId, activeMetaRef.current)
+        await processIncomingPoint(trackId, point)
       },
       (watchError) => {
         setError(watchError.message)
@@ -225,12 +337,161 @@ function App() {
     }
   }
 
-  const centerToLive = () => {
-    const map = mapRef.current
-    if (!map || !livePoint) {
+  const stopSimulation = () => {
+    if (simulationTimerRef.current !== null) {
+      window.clearInterval(simulationTimerRef.current)
+      simulationTimerRef.current = null
+    }
+    setIsSimulating(false)
+  }
+
+  const fetchRoutePath = async (start: LatLng, end: LatLng): Promise<LatLng[]> => {
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error('Không lấy được tuyến đường mô phỏng')
+    }
+    const data = await response.json() as {
+      routes?: Array<{ geometry?: { coordinates?: number[][] } }>
+    }
+    const coordinates = data.routes?.[0]?.geometry?.coordinates
+    if (!coordinates || coordinates.length < 2) {
+      throw new Error('Không có dữ liệu tuyến đường')
+    }
+    return coordinates.map(([lng, lat]) => ({ lat, lng }))
+  }
+
+  const toggleSimulation = async () => {
+    if (!activeProfile || state !== 'tracking' || !activeTrackId) {
       return
     }
-    map.setView([livePoint.lat, livePoint.lng], 17, { animate: true })
+
+    if (isSimulating) {
+      stopSimulation()
+      return
+    }
+
+    stopWatch()
+    const start = livePoint ?? {
+      lat: 10.8231,
+      lng: 106.6297,
+      ts: Date.now(),
+      accuracy: 5,
+      speed: 0,
+    }
+    let current = start
+    const stepMeters = 22
+    const trackId = activeTrackId
+    const target = SIM_TARGETS[activeProfile.id]
+    if (!target) {
+      setError('Chưa cấu hình điểm đích cho profile này')
+      return
+    }
+    let routePath: LatLng[]
+    try {
+      routePath = await fetchRoutePath({ lat: start.lat, lng: start.lng }, target)
+    } catch (routeError) {
+      setError(routeError instanceof Error ? routeError.message : 'Không thể tạo tuyến mô phỏng')
+      return
+    }
+    let routeIndex = 0
+
+    simulationTimerRef.current = window.setInterval(() => {
+      const nextNode = routePath[Math.min(routeIndex + 1, routePath.length - 1)]
+      const targetPoint: TrackPoint = {
+        lat: nextNode.lat,
+        lng: nextNode.lng,
+        ts: Date.now(),
+        accuracy: 4,
+        speed: 0,
+      }
+
+      const remaining = calcDistanceMeters(current, targetPoint)
+      if (remaining <= stepMeters) {
+        const finalPoint: TrackPoint = {
+          lat: targetPoint.lat,
+          lng: targetPoint.lng,
+          ts: Date.now(),
+          accuracy: 4,
+          speed: 0,
+        }
+        current = finalPoint
+        void processIncomingPoint(trackId, finalPoint)
+        routeIndex += 1
+        if (routeIndex >= routePath.length - 1) {
+          stopSimulation()
+        }
+        return
+      }
+
+      const ratio = stepMeters / remaining
+      const next: TrackPoint = {
+        lat: current.lat + (targetPoint.lat - current.lat) * ratio,
+        lng: current.lng + (targetPoint.lng - current.lng) * ratio,
+        ts: Date.now(),
+        accuracy: 4,
+        speed: 9.5,
+      }
+      current = next
+      void processIncomingPoint(trackId, next)
+    }, 2000)
+    setIsSimulating(true)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (simulationTimerRef.current !== null) {
+        window.clearInterval(simulationTimerRef.current)
+      }
+    }
+  }, [])
+
+  const centerToLive = () => {
+    if (!isUnlocked) {
+      setError('Chế độ chỉ xem: cần mở khóa để thao tác')
+      return
+    }
+    void panToCurrentPosition()
+  }
+
+  const panToCurrentPosition = async () => {
+    const map = mapRef.current
+    if (!map) {
+      setError('Bản đồ chưa sẵn sàng')
+      return false
+    }
+    map.invalidateSize()
+    if (livePoint) {
+      upsertCurrentMarker(livePoint)
+      map.flyTo([livePoint.lat, livePoint.lng], 17, { animate: true, duration: 0.6 })
+      return true
+    }
+    if (!navigator.geolocation) {
+      setError('Thiết bị không hỗ trợ GPS')
+      return false
+    }
+    try {
+      const point = await new Promise<TrackPoint>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(
+          (position) => resolve(toTrackPoint(position)),
+          (geoError) => reject(new Error(geoError.message)),
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+        )
+      })
+      setLivePoint(point)
+      upsertCurrentMarker(point)
+      map.flyTo([point.lat, point.lng], 17, { animate: true, duration: 0.6 })
+      return true
+    } catch (geoError) {
+      setError(geoError instanceof Error ? geoError.message : 'Không thể lấy vị trí hiện tại')
+      return false
+    }
+  }
+
+  const openPinModal = () => {
+    setPinInput('')
+    setPinError('')
+    setShowPinModal(true)
   }
 
   return (
@@ -239,90 +500,108 @@ function App() {
         <div className="map" ref={mapNodeRef} />
       </section>
 
-      <section className="topBar">
+      <section className="topBar" onClick={openPinModal}>
         <div>
-          <h1>GPS Tracking</h1>
-          <p>{gpsStatus}</p>
+          <h1>Theo dõi GPS</h1>
+          <p>{isUnlocked ? `${gpsStatus} - ${activeProfile?.label}` : 'Chế độ chỉ xem tuyến đường'}</p>
         </div>
-        <button className="ghostBtn" onClick={centerToLive} type="button">
-          Locate
-        </button>
+        <span className={`lockBadge ${isUnlocked ? 'ok' : ''}`}>{isUnlocked ? 'Đã mở khóa' : 'Đang khóa'}</span>
       </section>
 
-      <button className="fabLocate" onClick={centerToLive} type="button" aria-label="Center map">
-        +
+      <button className="fabLocate" onClick={centerToLive} type="button" aria-label="Vị trí hiện tại" disabled={!isUnlocked}>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 2a1 1 0 0 1 1 1v1.06a8 8 0 0 1 6.94 6.94H21a1 1 0 1 1 0 2h-1.06a8 8 0 0 1-6.94 6.94V21a1 1 0 1 1-2 0v-1.06a8 8 0 0 1-6.94-6.94H3a1 1 0 1 1 0-2h1.06a8 8 0 0 1 6.94-6.94V3a1 1 0 0 1 1-1Zm0 4a6 6 0 1 0 0 12 6 6 0 0 0 0-12Zm0 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z"
+            fill="currentColor"
+          />
+        </svg>
       </button>
+      <div className="speedSign" aria-label={`Tốc độ hiện tại ${speedDisplay} km/h`}>
+        <div className="speedSignInner">{speedDisplay}</div>
+      </div>
 
       <section className={`bottomSheet ${sheetExpanded ? 'expanded' : 'collapsed'}`}>
         <button className="sheetHandle" type="button" onClick={() => setSheetExpanded((v) => !v)} aria-label="Toggle panel">
           <span />
         </button>
-
-        {tab === 'track' && (
-          <div className="sheetContent">
-            <p className="permission">
-              GPS permission:{' '}
-              <strong>
-                {permission === 'granted'
-                  ? 'Granted'
-                  : permission === 'denied'
-                    ? 'Denied'
-                    : permission === 'prompt'
-                      ? 'Ask on Start'
-                      : 'Unknown'}
-              </strong>
-            </p>
-            <input value={trackName} onChange={(e) => setTrackName(e.target.value)} placeholder="Route name" />
-            <div className="buttons">
-              {state === 'idle' && <button onClick={startTracking}>Start</button>}
-              {state === 'tracking' && <button onClick={pauseTracking}>Pause</button>}
-              {state === 'paused' && <button onClick={resumeTracking}>Resume</button>}
-              {state !== 'idle' && <button onClick={stopTracking}>Stop</button>}
-            </div>
-            {activeTrack && (
-              <p className="meta">
-                Distance: {(activeTrack.meta.distanceMeters / 1000).toFixed(2)} km - Time: {Math.floor(activeTrack.meta.durationMs / 60000)} min
+        <div className="sheetContent">
+          {isUnlocked && (
+            <>
+              <p className="permission">
+                Quyền GPS:{' '}
+                <strong>
+                  {permission === 'granted'
+                    ? 'Đã cấp'
+                    : permission === 'denied'
+                      ? 'Từ chối'
+                      : permission === 'prompt'
+                        ? 'Hỏi khi bắt đầu'
+                        : 'Không rõ'}
+                </strong>
               </p>
-            )}
-            {error && <p className="error">{error}</p>}
-          </div>
-        )}
-
-        {tab === 'routes' && (
-          <div className="sheetContent">
-            <h2>Saved Routes</h2>
-            <ul>
-              {tracks.map((track) => (
-                <li key={track.meta.id}>
-                  <button
-                    className={selectedTrack?.meta.id === track.meta.id ? 'selected' : ''}
-                    onClick={() => setSelectedTrack(track)}
-                  >
-                    <strong>{track.meta.name}</strong>
-                    <span>{new Date(track.meta.startTime).toLocaleString()}</span>
-                    <span>{(track.meta.distanceMeters / 1000).toFixed(2)} km</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {tab === 'settings' && (
-          <div className="sheetContent settings">
-            <p>Device ID</p>
-            <code>{deviceId}</code>
-            <p>Map: OpenStreetMap</p>
-            <p>Database path: sharedDBTracking</p>
-          </div>
-        )}
+              <div className="buttons">
+                {state === 'idle' && <button onClick={startTracking}>Bắt đầu</button>}
+                {state !== 'idle' && <button onClick={stopTracking}>Kết thúc</button>}
+              </div>
+              {state === 'tracking' && (
+                <div className="buttons">
+                  <button type="button" onClick={toggleSimulation}>{isSimulating ? 'Dừng giả lập' : 'Giả lập di chuyển'}</button>
+                </div>
+              )}
+              {activeTrack && (
+                <p className="meta">
+                  Quãng đường: {(activeTrack.meta.distanceMeters / 1000).toFixed(2)} km - Thời gian: {Math.floor(activeTrack.meta.durationMs / 60000)} phút
+                </p>
+              )}
+            </>
+          )}
+          {error && <p className="error">{error}</p>}
+        </div>
       </section>
 
-      <nav className="footerNav" aria-label="Bottom Navigation">
-        <button className={tab === 'track' ? 'active' : ''} onClick={() => setTab('track')} type="button">Track</button>
-        <button className={tab === 'routes' ? 'active' : ''} onClick={() => setTab('routes')} type="button">Routes</button>
-        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')} type="button">Settings</button>
-      </nav>
+      {showPinModal && (
+        <div className="pinModalBackdrop" role="dialog" aria-modal="true" aria-label="Nhập mật khẩu mở khóa">
+          <div className="pinModal">
+            <h3>Mở khóa vẽ tuyến</h3>
+            <p>Nhập mật khẩu 6 số để chọn profile</p>
+            <input
+              className="pinInput"
+              value={pinInput}
+              onChange={(e) => {
+                const value = e.target.value.replace(/\D/g, '').slice(0, 6)
+                setPinInput(value)
+                if (value.length === 6) {
+                  const matched = PROFILES.find((profile) => profile.pin === value)
+                  if (matched) {
+                    stopWatch()
+                    activeMetaRef.current = null
+                    setActiveTrackId(null)
+                    setState('idle')
+                    setLivePoint(null)
+                    markerRef.current?.remove()
+                    markerRef.current = null
+                    setActiveProfile(matched)
+                    setShowPinModal(false)
+                    setPinError('')
+                    setError('')
+                    void panToCurrentPosition()
+                    return
+                  }
+                  setPinError('Mật khẩu không đúng')
+                } else {
+                  setPinError('')
+                }
+              }}
+              inputMode="numeric"
+              placeholder="******"
+            />
+            {pinError && <p className="error">{pinError}</p>}
+            <div className="pinActions">
+              <button type="button" onClick={() => setShowPinModal(false)}>Hủy</button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }

@@ -49,6 +49,20 @@ body {
   overflow-wrap: anywhere;
 }
 
+.lockBadge {
+  font-size: 0.75rem;
+  color: #f8fafc;
+  background: rgba(239, 68, 68, 0.3);
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.lockBadge.ok {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: rgba(16, 185, 129, 0.6);
+}
+
 .mapWrap {
   width: 100%;
   height: 100%;
@@ -71,24 +85,57 @@ body {
 .fabLocate {
   position: fixed;
   right: 14px;
-  bottom: 230px;
+  bottom: calc(max(10px, env(safe-area-inset-bottom)) + 132px);
   z-index: 1003;
-  width: 44px;
-  height: 44px;
+  width: 50px;
+  height: 50px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.5);
   background: rgba(15, 23, 42, 0.8);
   color: #fff;
-  font-size: 1.35rem;
-  line-height: 1;
+  display: grid;
+  place-items: center;
   padding: 0;
+}
+
+.fabLocate svg {
+  width: 24px;
+  height: 24px;
+}
+
+.speedSign {
+  position: fixed;
+  left: 14px;
+  bottom: calc(max(10px, env(safe-area-inset-bottom)) + 132px);
+  z-index: 1003;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: #ef1111;
+  border: 4px solid #ffffff;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.35);
+  display: grid;
+  place-items: center;
+}
+
+.speedSignInner {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #f8fafc;
+  color: #111827;
+  font-size: 1.2rem;
+  font-weight: 800;
+  line-height: 1;
+  display: grid;
+  place-items: center;
 }
 
 .bottomSheet {
   position: fixed;
   left: 10px;
   right: 10px;
-  bottom: calc(78px + env(safe-area-inset-bottom));
+  bottom: max(10px, env(safe-area-inset-bottom));
   z-index: 1002;
   background: rgba(255, 255, 255, 0.95);
   border: 1px solid #dbe1ea;
@@ -100,7 +147,7 @@ body {
 }
 
 .bottomSheet.collapsed {
-  max-height: 120px;
+  max-height: 168px;
 }
 
 .bottomSheet.expanded {
@@ -124,7 +171,7 @@ body {
 }
 
 .sheetContent {
-  padding: 4px 12px 12px;
+  padding: 4px 12px calc(14px + env(safe-area-inset-bottom));
 }
 
 .sheetContent ul {
@@ -160,6 +207,10 @@ button {
   color: #fff;
 }
 
+button:disabled {
+  opacity: 0.5;
+}
+
 .buttons button {
   flex: 1;
 }
@@ -180,6 +231,12 @@ button {
   color: #b91c1c;
 }
 
+.lockedMessage {
+  margin: 10px 0 0;
+  font-size: 0.86rem;
+  color: #334155;
+}
+
 .sheetContent li button {
   width: 100%;
   text-align: left;
@@ -191,33 +248,6 @@ button {
 
 .sheetContent li button.selected {
   outline: 2px solid #2563eb;
-}
-
-.footerNav {
-  position: fixed;
-  left: 10px;
-  right: 10px;
-  bottom: max(10px, env(safe-area-inset-bottom));
-  z-index: 1002;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-  padding: 8px;
-  background: rgba(15, 23, 42, 0.84);
-  border-radius: 18px;
-  backdrop-filter: blur(14px);
-}
-
-.footerNav button {
-  background: rgba(255, 255, 255, 0.04);
-  color: #cbd5e1;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.footerNav button.active {
-  background: #2563eb;
-  color: #fff;
-  border-color: #2563eb;
 }
 
 .settings p {
@@ -232,4 +262,75 @@ button {
   background: #eef2ff;
   font-size: 0.8rem;
   overflow-wrap: anywhere;
+}
+
+.current-marker {
+  background: transparent;
+  border: 0;
+  width: 40px !important;
+  height: 40px !important;
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+.current-marker-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 3px solid #22c55e;
+  outline: 2px solid #ffffff;
+  outline-offset: 0;
+  object-fit: cover;
+  object-position: center center;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.4);
+}
+
+.current-marker.profile-b .current-marker-image {
+  object-fit: contain;
+  background: #ffffff;
+}
+
+.pinModalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(2, 6, 23, 0.55);
+  display: grid;
+  place-items: center;
+  padding: 14px;
+}
+
+.pinModal {
+  width: min(100%, 340px);
+  background: #fff;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  padding: 14px;
+}
+
+.pinModal h3 {
+  margin: 0;
+}
+
+.pinModal p {
+  margin: 8px 0 0;
+  color: #475569;
+}
+
+.pinInput {
+  margin-top: 12px;
+  text-align: center;
+  font-size: 1.15rem;
+  letter-spacing: 0.25rem;
+}
+
+.pinActions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+.pinActions button {
+  min-width: 120px;
 }

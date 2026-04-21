@@ -34,6 +34,14 @@ export function saveLiveLocation(deviceId: string, point: TrackPoint) {
   return set(ref(db, `${ROOT}/liveLocation/${deviceId}`), point)
 }
 
+export function listenLiveLocation(deviceId: string, cb: (point: TrackPoint | null) => void) {
+  const liveRef = ref(db, `${ROOT}/liveLocation/${deviceId}`)
+  return onValue(liveRef, (snapshot) => {
+    const value = snapshot.val() as TrackPoint | null
+    cb(value ?? null)
+  })
+}
+
 export function updateTrackMeta(deviceId: string, meta: TrackMeta) {
   return set(ref(db, `${ROOT}/gpsTracks/${deviceId}/${meta.id}/meta`), meta)
 }
@@ -59,5 +67,48 @@ export function listenTracks(deviceId: string, cb: (tracks: SavedTrack[]) => voi
       .sort((a, b) => b.meta.startTime - a.meta.startTime)
 
     cb(tracks)
+  })
+}
+
+export function listenAllTracks(cb: (tracksByUser: Record<string, SavedTrack[]>) => void) {
+  const tracksRef = ref(db, `${ROOT}/gpsTracks`)
+  return onValue(tracksRef, (snapshot) => {
+    const raw = snapshot.val() as
+      | Record<string, Record<string, { meta?: TrackMeta; points?: Record<string, TrackPoint> }>>
+      | null
+
+    if (!raw) {
+      cb({})
+      return
+    }
+
+    const result: Record<string, SavedTrack[]> = {}
+    Object.entries(raw).forEach(([userId, tracksObj]) => {
+      const tracks = Object.values(tracksObj ?? {})
+        .filter((item) => item.meta)
+        .map((item) => {
+          const points = item.points ? Object.values(item.points).sort((a, b) => a.ts - b.ts) : []
+          return { meta: item.meta as TrackMeta, points }
+        })
+        .sort((a, b) => b.meta.startTime - a.meta.startTime)
+      result[userId] = tracks
+    })
+    cb(result)
+  })
+}
+
+export function listenAllLiveLocations(cb: (liveByUser: Record<string, TrackPoint | null>) => void) {
+  const liveRef = ref(db, `${ROOT}/liveLocation`)
+  return onValue(liveRef, (snapshot) => {
+    const raw = snapshot.val() as Record<string, TrackPoint> | null
+    if (!raw) {
+      cb({})
+      return
+    }
+    const result: Record<string, TrackPoint | null> = {}
+    Object.entries(raw).forEach(([userId, point]) => {
+      result[userId] = point ?? null
+    })
+    cb(result)
   })
 }
