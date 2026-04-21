@@ -273,6 +273,21 @@ button:disabled {
   overflow: hidden;
 }
 
+.current-marker-label {
+  position: absolute;
+  left: 50%;
+  top: -26px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(15, 23, 42, 0.88);
+  border-radius: 999px;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
 .current-marker-image {
   display: block;
   width: 100%;

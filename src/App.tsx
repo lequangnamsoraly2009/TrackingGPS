@@ -9,22 +9,27 @@ import type { SavedTrack, TrackMeta, TrackPoint } from './types'
 type TrackingState = 'idle' | 'tracking'
 type PermissionStateEx = 'unknown' | 'granted' | 'denied' | 'prompt'
 type Profile = { id: string; label: string; pin: string; markerImage: string }
-type LatLng = { lat: number; lng: number }
 type RenderTrack = SavedTrack & { profileId: string }
+type MarkerMeta = { label: string; speedKmh: number }
+type WakeLockSentinel = {
+  released?: boolean
+  release: () => Promise<void>
+  addEventListener?: (type: string, listener: () => void) => void
+}
+type WakeLockNavigator = Navigator & {
+  wakeLock?: {
+    request: (type: 'screen') => Promise<WakeLockSentinel>
+  }
+}
 
 const PROFILES: Profile[] = [
   { id: 'profile-a', label: 'Soraly', pin: '123456', markerImage: currentMarkerImage },
   { id: 'profile-b', label: 'Stacy', pin: '111111', markerImage: altMarkerImage },
 ]
-const SIM_TARGETS: Record<string, LatLng> = {
-  'profile-a': { lat: 10.8624948, lng: 106.6474743 },
-  'profile-b': { lat: 10.833864, lng: 106.681869 },
-}
-
-function getMarkerIcon(image: string, profileId?: string) {
+function getMarkerIcon(image: string, markerMeta: MarkerMeta, profileId?: string) {
   return L.divIcon({
     className: `current-marker ${profileId ?? ''}`.trim(),
-    html: `<img src="${image}" class="current-marker-image" alt="Vị trí hiện tại" />`,
+    html: `<div class="current-marker-label">${markerMeta.label} • ${Math.round(markerMeta.speedKmh)} km/h</div><img src="${image}" class="current-marker-image" alt="Vị trí hiện tại" />`,
     iconSize: [40, 40],
     iconAnchor: [20, 20],
   })
@@ -32,6 +37,10 @@ function getMarkerIcon(image: string, profileId?: string) {
 
 function getMarkerImageByUserId(userId: string) {
   return PROFILES.find((p) => p.id === userId)?.markerImage ?? currentMarkerImage
+}
+
+function getProfileLabelByUserId(userId: string) {
+  return PROFILES.find((p) => p.id === userId)?.label ?? userId
 }
 
 function getRouteColorByUserId(userId: string) {
@@ -55,8 +64,8 @@ function App() {
   const [showPinModal, setShowPinModal] = useState(false)
   const [pinInput, setPinInput] = useState('')
   const [pinError, setPinError] = useState('')
-  const [isSimulating, setIsSimulating] = useState(false)
   const [liveByProfile, setLiveByProfile] = useState<Record<string, TrackPoint | null>>({})
+  const [followedUserId, setFollowedUserId] = useState<string | null>(null)
 
   const watchIdRef = useRef<number | null>(null)
   const activeMetaRef = useRef<TrackMeta | null>(null)
@@ -67,11 +76,19 @@ function App() {
   const liveMarkersLayerRef = useRef<L.LayerGroup | null>(null)
   const liveMarkerRefs = useRef<Record<string, L.Marker>>({})
   const mapNodeRef = useRef<HTMLDivElement | null>(null)
-  const simulationTimerRef = useRef<number | null>(null)
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null)
   const isUnlocked = Boolean(activeProfile)
   const markerIcon = useMemo(
-    () => getMarkerIcon(activeProfile?.markerImage ?? currentMarkerImage, activeProfile?.id),
-    [activeProfile],
+    () =>
+      getMarkerIcon(
+        activeProfile?.markerImage ?? currentMarkerImage,
+        {
+          label: activeProfile?.label ?? 'Khách',
+          speedKmh: Math.max(0, (livePoint?.speed ?? 0) * 3.6),
+        },
+        activeProfile?.id,
+      ),
+    [activeProfile, livePoint],
   )
 
   useEffect(() => {
@@ -88,11 +105,18 @@ function App() {
     const latlng: [number, number] = [point.lat, point.lng]
     if (!markerRef.current) {
       markerRef.current = L.marker(latlng, { icon: markerIcon, zIndexOffset: 1000 }).addTo(map)
+      if (activeProfile) {
+        markerRef.current.on('click', () => setFollowedUserId(activeProfile.id))
+      }
       return
     }
     markerRef.current.setIcon(markerIcon)
     markerRef.current.setLatLng(latlng)
-  }, [markerIcon])
+    if (activeProfile) {
+      markerRef.current.off('click')
+      markerRef.current.on('click', () => setFollowedUserId(activeProfile.id))
+    }
+  }, [markerIcon, activeProfile])
 
   useEffect(() => listenAllTracks(setTracksByProfile), [])
 
@@ -124,6 +148,56 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const requestWakeLock = async () => {
+      const wakeNavigator = navigator as WakeLockNavigator
+      if (state !== 'tracking' || typeof navigator === 'undefined' || !wakeNavigator.wakeLock?.request) {
+        return
+      }
+      try {
+        const lock = await wakeNavigator.wakeLock.request('screen')
+        wakeLockRef.current = lock
+        lock.addEventListener?.('release', () => {
+          wakeLockRef.current = null
+        })
+      } catch {
+        // Ignore if device/browser denies wake lock.
+      }
+    }
+
+    const releaseWakeLock = async () => {
+      if (wakeLockRef.current) {
+        try {
+          await wakeLockRef.current.release()
+        } catch {
+          // no-op
+        } finally {
+          wakeLockRef.current = null
+        }
+      }
+    }
+
+    if (state === 'tracking') {
+      void requestWakeLock()
+    } else {
+      void releaseWakeLock()
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && state === 'tracking') {
+        void requestWakeLock()
+      } else if (document.visibilityState !== 'visible') {
+        void releaseWakeLock()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility)
+      void releaseWakeLock()
+    }
+  }, [state])
+
+  useEffect(() => {
     if (!mapNodeRef.current || mapRef.current) {
       return
     }
@@ -149,6 +223,39 @@ function App() {
   const gpsStatus = state === 'tracking' ? 'Đang chia sẻ vị trí' : 'Chưa chia sẻ vị trí'
   const currentSpeedKmh = livePoint?.speed !== null && livePoint?.speed !== undefined ? Math.max(0, livePoint.speed * 3.6) : 0
   const speedDisplay = Math.round(currentSpeedKmh)
+  const followedInfo = useMemo(() => {
+    if (!followedUserId) return null
+    if (activeProfile?.id === followedUserId) {
+      return {
+        label: activeProfile.label,
+        speed: Math.max(0, (livePoint?.speed ?? 0) * 3.6),
+      }
+    }
+    const point = liveByProfile[followedUserId]
+    if (!point) return null
+    return {
+      label: getProfileLabelByUserId(followedUserId),
+      speed: Math.max(0, (point.speed ?? 0) * 3.6),
+    }
+  }, [followedUserId, activeProfile, livePoint, liveByProfile])
+
+  const followedPoint = useMemo(() => {
+    if (!followedUserId) return null
+    if (activeProfile?.id === followedUserId) return livePoint
+    return liveByProfile[followedUserId] ?? null
+  }, [followedUserId, activeProfile, livePoint, liveByProfile])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !followedPoint) {
+      return
+    }
+    const zoom = map.getZoom()
+    map.panTo([followedPoint.lat, followedPoint.lng], { animate: true, duration: 0.6 })
+    if (zoom < 16) {
+      map.setZoom(16, { animate: true })
+    }
+  }, [followedPoint])
 
   useEffect(() => {
     const map = mapRef.current
@@ -214,13 +321,23 @@ function App() {
       }
 
       const latlng: [number, number] = [point.lat, point.lng]
-      const icon = getMarkerIcon(getMarkerImageByUserId(userId), userId)
+      const icon = getMarkerIcon(
+        getMarkerImageByUserId(userId),
+        {
+          label: getProfileLabelByUserId(userId),
+          speedKmh: Math.max(0, (point.speed ?? 0) * 3.6),
+        },
+        userId,
+      )
       const existing = liveMarkerRefs.current[userId]
       if (!existing) {
         liveMarkerRefs.current[userId] = L.marker(latlng, { icon, zIndexOffset: 900 }).addTo(layer)
+        liveMarkerRefs.current[userId].on('click', () => setFollowedUserId(userId))
       } else {
         existing.setIcon(icon)
         existing.setLatLng(latlng)
+        existing.off('click')
+        existing.on('click', () => setFollowedUserId(userId))
       }
     })
   }, [activeProfile, liveByProfile])
@@ -307,7 +424,6 @@ function App() {
     activeMetaRef.current = null
     setActiveTrackId(null)
     setState('idle')
-    stopSimulation()
   }
 
   const ensureWatch = (trackId: string) => {
@@ -336,115 +452,6 @@ function App() {
       watchIdRef.current = null
     }
   }
-
-  const stopSimulation = () => {
-    if (simulationTimerRef.current !== null) {
-      window.clearInterval(simulationTimerRef.current)
-      simulationTimerRef.current = null
-    }
-    setIsSimulating(false)
-  }
-
-  const fetchRoutePath = async (start: LatLng, end: LatLng): Promise<LatLng[]> => {
-    const url = `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`
-    const response = await fetch(url)
-    if (!response.ok) {
-      throw new Error('Không lấy được tuyến đường mô phỏng')
-    }
-    const data = await response.json() as {
-      routes?: Array<{ geometry?: { coordinates?: number[][] } }>
-    }
-    const coordinates = data.routes?.[0]?.geometry?.coordinates
-    if (!coordinates || coordinates.length < 2) {
-      throw new Error('Không có dữ liệu tuyến đường')
-    }
-    return coordinates.map(([lng, lat]) => ({ lat, lng }))
-  }
-
-  const toggleSimulation = async () => {
-    if (!activeProfile || state !== 'tracking' || !activeTrackId) {
-      return
-    }
-
-    if (isSimulating) {
-      stopSimulation()
-      return
-    }
-
-    stopWatch()
-    const start = livePoint ?? {
-      lat: 10.8231,
-      lng: 106.6297,
-      ts: Date.now(),
-      accuracy: 5,
-      speed: 0,
-    }
-    let current = start
-    const stepMeters = 22
-    const trackId = activeTrackId
-    const target = SIM_TARGETS[activeProfile.id]
-    if (!target) {
-      setError('Chưa cấu hình điểm đích cho profile này')
-      return
-    }
-    let routePath: LatLng[]
-    try {
-      routePath = await fetchRoutePath({ lat: start.lat, lng: start.lng }, target)
-    } catch (routeError) {
-      setError(routeError instanceof Error ? routeError.message : 'Không thể tạo tuyến mô phỏng')
-      return
-    }
-    let routeIndex = 0
-
-    simulationTimerRef.current = window.setInterval(() => {
-      const nextNode = routePath[Math.min(routeIndex + 1, routePath.length - 1)]
-      const targetPoint: TrackPoint = {
-        lat: nextNode.lat,
-        lng: nextNode.lng,
-        ts: Date.now(),
-        accuracy: 4,
-        speed: 0,
-      }
-
-      const remaining = calcDistanceMeters(current, targetPoint)
-      if (remaining <= stepMeters) {
-        const finalPoint: TrackPoint = {
-          lat: targetPoint.lat,
-          lng: targetPoint.lng,
-          ts: Date.now(),
-          accuracy: 4,
-          speed: 0,
-        }
-        current = finalPoint
-        void processIncomingPoint(trackId, finalPoint)
-        routeIndex += 1
-        if (routeIndex >= routePath.length - 1) {
-          stopSimulation()
-        }
-        return
-      }
-
-      const ratio = stepMeters / remaining
-      const next: TrackPoint = {
-        lat: current.lat + (targetPoint.lat - current.lat) * ratio,
-        lng: current.lng + (targetPoint.lng - current.lng) * ratio,
-        ts: Date.now(),
-        accuracy: 4,
-        speed: 9.5,
-      }
-      current = next
-      void processIncomingPoint(trackId, next)
-    }, 2000)
-    setIsSimulating(true)
-  }
-
-  useEffect(() => {
-    return () => {
-      if (simulationTimerRef.current !== null) {
-        window.clearInterval(simulationTimerRef.current)
-      }
-    }
-  }, [])
 
   const centerToLive = () => {
     if (!isUnlocked) {
@@ -503,7 +510,13 @@ function App() {
       <section className="topBar" onClick={openPinModal}>
         <div>
           <h1>Theo dõi GPS</h1>
-          <p>{isUnlocked ? `${gpsStatus} - ${activeProfile?.label}` : 'Chế độ chỉ xem tuyến đường'}</p>
+          <p>
+            {followedInfo
+              ? `Đang theo dõi: ${followedInfo.label} - ${Math.round(followedInfo.speed)} km/h`
+              : isUnlocked
+                ? `${gpsStatus} - ${activeProfile?.label}`
+                : 'Chế độ chỉ xem tuyến đường'}
+          </p>
         </div>
         <span className={`lockBadge ${isUnlocked ? 'ok' : ''}`}>{isUnlocked ? 'Đã mở khóa' : 'Đang khóa'}</span>
       </section>
@@ -543,11 +556,6 @@ function App() {
                 {state === 'idle' && <button onClick={startTracking}>Bắt đầu</button>}
                 {state !== 'idle' && <button onClick={stopTracking}>Kết thúc</button>}
               </div>
-              {state === 'tracking' && (
-                <div className="buttons">
-                  <button type="button" onClick={toggleSimulation}>{isSimulating ? 'Dừng giả lập' : 'Giả lập di chuyển'}</button>
-                </div>
-              )}
               {activeTrack && (
                 <p className="meta">
                   Quãng đường: {(activeTrack.meta.distanceMeters / 1000).toFixed(2)} km - Thời gian: {Math.floor(activeTrack.meta.durationMs / 60000)} phút
