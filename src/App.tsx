@@ -53,6 +53,7 @@ function getRouteColorByUserId(userId: string) {
 }
 
 function App() {
+  const SAVE_INTERVAL_MS = 10_000
   const [tracksByProfile, setTracksByProfile] = useState<Record<string, SavedTrack[]>>({})
   const [activeTrackId, setActiveTrackId] = useState<string | null>(null)
   const [livePoint, setLivePoint] = useState<TrackPoint | null>(null)
@@ -66,10 +67,12 @@ function App() {
   const [pinError, setPinError] = useState('')
   const [liveByProfile, setLiveByProfile] = useState<Record<string, TrackPoint | null>>({})
   const [followedUserId, setFollowedUserId] = useState<string | null>(null)
+  const [trackingOverlay, setTrackingOverlay] = useState(false)
 
   const watchIdRef = useRef<number | null>(null)
   const activeMetaRef = useRef<TrackMeta | null>(null)
   const lastSavedPointRef = useRef<TrackPoint | null>(null)
+  const lastPersistedAtRef = useRef<number>(0)
   const mapRef = useRef<L.Map | null>(null)
   const markerRef = useRef<L.Marker | null>(null)
   const routesLayerRef = useRef<L.LayerGroup | null>(null)
@@ -359,7 +362,9 @@ function App() {
       activeMetaRef.current = created.meta
       setActiveTrackId(created.id)
       setState('tracking')
+      setTrackingOverlay(true)
       lastSavedPointRef.current = null
+      lastPersistedAtRef.current = 0
       ensureWatch(created.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không thể bắt đầu theo dõi')
@@ -371,6 +376,14 @@ function App() {
     if (!activeProfile) {
       return
     }
+
+    const now = Date.now()
+    const shouldPersist = lastPersistedAtRef.current === 0 || now - lastPersistedAtRef.current >= SAVE_INTERVAL_MS
+    if (!shouldPersist) {
+      return
+    }
+    lastPersistedAtRef.current = now
+
     await saveLiveLocation(activeProfile.id, point)
     await saveTrackPoint(activeProfile.id, trackId, point)
 
@@ -424,6 +437,7 @@ function App() {
     activeMetaRef.current = null
     setActiveTrackId(null)
     setState('idle')
+    setTrackingOverlay(false)
   }
 
   const ensureWatch = (trackId: string) => {
@@ -495,6 +509,28 @@ function App() {
     }
   }
 
+  const syncLiveLocationNow = async (profileId: string) => {
+    try {
+      const point = await new Promise<TrackPoint>((resolve, reject) => {
+        if (!navigator.geolocation) {
+          reject(new Error('Thiết bị không hỗ trợ GPS'))
+          return
+        }
+        navigator.geolocation.getCurrentPosition(
+          (position) => resolve(toTrackPoint(position)),
+          (geoError) => reject(new Error(geoError.message)),
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+        )
+      })
+      setLivePoint(point)
+      await saveLiveLocation(profileId, point)
+      upsertCurrentMarker(point)
+      mapRef.current?.flyTo([point.lat, point.lng], 17, { animate: true, duration: 0.6 })
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : 'Không thể cập nhật vị trí hiện tại')
+    }
+  }
+
   const openPinModal = () => {
     setPinInput('')
     setPinError('')
@@ -532,6 +568,14 @@ function App() {
       <div className="speedSign" aria-label={`Tốc độ hiện tại ${speedDisplay} km/h`}>
         <div className="speedSignInner">{speedDisplay}</div>
       </div>
+
+      {trackingOverlay && (
+        <div className="trackingOverlay" aria-hidden="true">
+          <button type="button" className="trackingOverlayStop" onClick={stopTracking}>
+            Kết thúc
+          </button>
+        </div>
+      )}
 
       <section className={`bottomSheet ${sheetExpanded ? 'expanded' : 'collapsed'}`}>
         <button className="sheetHandle" type="button" onClick={() => setSheetExpanded((v) => !v)} aria-label="Toggle panel">
@@ -592,7 +636,7 @@ function App() {
                     setShowPinModal(false)
                     setPinError('')
                     setError('')
-                    void panToCurrentPosition()
+                    void syncLiveLocationNow(matched.id)
                     return
                   }
                   setPinError('Mật khẩu không đúng')
